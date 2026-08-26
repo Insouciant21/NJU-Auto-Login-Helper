@@ -1,6 +1,6 @@
-// pack-crx.mjs — Create a CRX3 file from an extension directory + PEM key
+// pack-crx.mjs — Create a CRX3 file from a ZIP + PEM key
 //
-// Usage: node scripts/pack-crx.mjs <ext-dir> <key.pem> <output.crx>
+// Usage: node scripts/pack-crx.mjs <extension.zip> <key.pem> <output.crx>
 //
 // CRX3 format (little-endian):
 //   4 bytes  magic "Cr24"
@@ -9,15 +9,13 @@
 //   N bytes  protobuf CrxFileHeader
 //   ...      ZIP of extension files
 
-import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
-import { createHash, createPrivateKey, createPublicKey, sign } from "node:crypto";
-import { join, basename } from "node:path";
-import { execSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+import { createHash, createPrivateKey, createPublicKey, sign, constants } from "node:crypto";
 
 // ── CLI args ─────────────────────────────────────────────────────────
-const [,, extDir, keyPath, outPath] = process.argv;
-if (!extDir || !keyPath || !outPath) {
-  console.error("Usage: node scripts/pack-crx.mjs <ext-dir> <key.pem> <output.crx>");
+const [,, zipPath, keyPath, outPath] = process.argv;
+if (!zipPath || !keyPath || !outPath) {
+  console.error("Usage: node scripts/pack-crx.mjs <ext.zip> <key.pem> <output.crx>");
   process.exit(1);
 }
 
@@ -26,24 +24,29 @@ const pem = readFileSync(keyPath, "utf-8");
 const privateKey = createPrivateKey({ key: pem, format: "pem" });
 const publicKeyDer = createPublicKey(privateKey).export({ type: "spki", format: "der" });
 
-// ── ZIP the extension directory ──────────────────────────────────────
-const extName = basename(extDir);
-const parentDir = join(extDir, "..");
-const zipPath = outPath.replace(/\.crx$/, ".zip");
-
-// Use system `zip` for deterministic output (available on ubuntu-latest)
-execSync(`cd "${parentDir}" && zip -qr "${zipPath}" "${extName}"`, { encoding: "utf-8" });
+// ── Read the ZIP ─────────────────────────────────────────────────────
 const zipData = readFileSync(zipPath);
 
-// ── Sign ─────────────────────────────────────────────────────────────
-// 1. Compute SHA-256 of ZIP body
-const zipHash = createHash("sha256").update(zipData).digest();
+// ── Build and sign SignedData ────────────────────────────────────────
+// CRX3 identifies a developer-key package with the first 16 bytes of the
+// SHA-256 hash of its DER-encoded public key.
+const crxId = createHash("sha256").update(publicKeyDer).digest().subarray(0, 16);
+const signedHeaderData = pbBytes(1, crxId);
+const signedHeaderSize = Buffer.alloc(4);
+signedHeaderSize.writeUInt32LE(signedHeaderData.length, 0);
 
-// 2. Serialize SignedData protobuf: field 1 (sha256_hash) = zipHash
-const signedData = pbBytes(1, zipHash);
-
-// 3. Sign the SignedData bytes with RSA-SHA256
-const signatureBytes = sign("RSA-SHA256", signedData, privateKey);
+// Chromium verifies the context, signed-header size, signed header, and the
+// complete ZIP archive as one RSA-SHA256 payload.
+const signedBytes = Buffer.concat([
+  Buffer.from("CRX3 SignedData\0", "utf-8"),
+  signedHeaderSize,
+  signedHeaderData,
+  zipData,
+]);
+const signatureBytes = sign("RSA-SHA256", signedBytes, {
+  key: privateKey,
+  padding: constants.RSA_PKCS1_PADDING,
+});
 
 // ── Build CrxFileHeader protobuf ─────────────────────────────────────
 //   repeated AsymmetricKeyProof sha256_with_rsa = 2;
@@ -56,7 +59,7 @@ const keyProof = Buffer.concat([
 ]);
 const crxHeader = Buffer.concat([
   pbBytes(2, keyProof),          // sha256_with_rsa
-  pbBytes(10000, signedData),    // signed_header_data
+  pbBytes(10000, signedHeaderData), // signed_header_data
 ]);
 
 // ── Write CRX3 file ──────────────────────────────────────────────────
@@ -67,9 +70,6 @@ const hdrLen = Buffer.alloc(4); hdrLen.writeUInt32LE(crxHeader.length, 0);
 const crx = Buffer.concat([magic, ver, hdrLen, crxHeader, zipData]);
 writeFileSync(outPath, crx);
 console.log("CRX written: %s (%s KB)", outPath, (crx.length / 1024).toFixed(1));
-
-// Clean up temp ZIP
-try { unlinkSync(zipPath); } catch (_) { /* ok */ }
 
 // ── Protobuf helper ──────────────────────────────────────────────────
 // Encode a length-delimited bytes field: tag | len | payload

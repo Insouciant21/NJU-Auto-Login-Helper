@@ -1,51 +1,38 @@
 import * as ort from "onnxruntime-web/all";
 
-var CHARSET = [
-  "1","2","3","4","5","6","7","8","9",
-  "a","b","c","d","e","f","g","h","i",
-  "j","k","l","m","n","o","p","q","r",
-  "s","t","u","v","w","x","y","z"
-];
+// Standard OCR model and charset shipped by ddddocr-node.
+var MODEL_NAME = "common_old.onnx";
+var CHARSET_NAME = "common_old.json";
+var VALID_CHARS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+var _session = null, _charset = null, _ready = false, _initPromise = null;
 
-var IMG_W = 80, IMG_H = 30;
-
-var MEAN_R = 0.7336, MEAN_G = 0.745, MEAN_B = 0.778;
-var STD_R  = 0.3062, STD_G  = 0.31,  STD_B  = 0.3177;
-
-var _session = null, _ready = false, _initPromise = null;
-
-export function init(modelUrl) {
+export function init(modelRoot) {
   if (_ready) return Promise.resolve();
   if (_initPromise) return _initPromise;
-  _initPromise = _doInit(modelUrl);
+  _initPromise = _doInit(modelRoot).catch(function (err) {
+    // A transient WASM/model load failure must not poison this tab forever.
+    _session = null;
+    _charset = null;
+    _ready = false;
+    _initPromise = null;
+    throw err;
+  });
   return _initPromise;
 }
 
-async function _doInit(modelUrl) {
-  // Pre-fetch model ourselves (most reliable in content-script context)
-  console.log("[CaptchaOCR] Fetching model:", modelUrl);
-  var resp = await fetch(modelUrl);
-  if (!resp.ok) throw new Error("Fetch " + resp.status);
-  var buf = await resp.arrayBuffer();
-  console.log("[CaptchaOCR] Model:", (buf.byteLength / 1024).toFixed(1) + "KB");
-
-  // Try WebGL first (no WASM/COOP issues), fallback to default.
-  // Model dim_denotations have been cleared — no more shape mismatch.
-  var backends = ["webgl", "wasm"];
-  for (var i = 0; i < backends.length; i++) {
-    try {
-      console.log("[CaptchaOCR] Trying " + backends[i] + "...");
-      _session = await ort.InferenceSession.create(buf, {
-        executionProviders: [backends[i]]
-      });
-      _ready = true;
-      console.log("[CaptchaOCR] " + backends[i] + " OK");
-      return;
-    } catch (e) {
-      console.warn("[CaptchaOCR] " + backends[i] + " failed:", e.message || e);
-    }
-  }
-  throw new Error("All backends failed");
+async function _doInit(modelRoot) {
+  var root = modelRoot.endsWith("/") ? modelRoot : modelRoot + "/";
+  ort.env.wasm.wasmPaths = chrome.runtime.getURL("dist/");
+  var response = await fetch(root + MODEL_NAME);
+  if (!response.ok) throw new Error("Fetch model " + response.status);
+  var modelData = await response.arrayBuffer();
+  var charsetResponse = await fetch(root + CHARSET_NAME);
+  if (!charsetResponse.ok) throw new Error("Fetch charset " + charsetResponse.status);
+  _charset = await charsetResponse.json();
+  _session = await ort.InferenceSession.create(modelData, {
+    executionProviders: ["webgl", "wasm"]
+  });
+  _ready = true;
 }
 
 export function isReady() { return _ready; }
@@ -54,47 +41,82 @@ export function whenReady() {
   return _initPromise || Promise.reject(new Error("init never called"));
 }
 
-function imgElementToTensor(imgEl) {
-  var c = document.createElement("canvas");
-  c.width = IMG_W; c.height = IMG_H;
-  var ctx = c.getContext("2d");
-  if (ctx.imageSmoothingQuality) ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(imgEl, 0, 0, IMG_W, IMG_H);
-
-  var pixels = ctx.getImageData(0, 0, IMG_W, IMG_H).data;
-  var area = IMG_W * IMG_H;
-  var out = new Float32Array(3 * area);
-
-  for (var i = 0; i < area; i++) {
-    var p = i * 4;
-    out[0*area + i] = (pixels[p]     / 255 - MEAN_R) / STD_R;
-    out[1*area + i] = (pixels[p + 1] / 255 - MEAN_G) / STD_G;
-    out[2*area + i] = (pixels[p + 2] / 255 - MEAN_B) / STD_B;
+async function imageToTensor(imgEl) {
+  if (!imgEl.complete || imgEl.naturalWidth === 0) {
+    await new Promise(function (resolve, reject) {
+      var done = false;
+      var finish = function (callback, value) {
+        if (done) return;
+        done = true;
+        callback(value);
+      };
+      var onLoad = function () { finish(resolve, imgEl); };
+      var onError = function (err) { finish(reject, err); };
+      imgEl.addEventListener("load", onLoad, { once: true });
+      imgEl.addEventListener("error", onError, { once: true });
+      // The image may have completed between the initial check and listener
+      // registration.
+      if (imgEl.complete) {
+        if (imgEl.naturalWidth > 0) onLoad();
+        else onError(new Error("captcha image failed to load"));
+      }
+    });
   }
-
-  return new ort.Tensor("float32", out, [1, 3, IMG_H, IMG_W]);
+  if (!imgEl.naturalWidth || !imgEl.naturalHeight) {
+    throw new Error("captcha image has no dimensions");
+  }
+  var targetHeight = 64;
+  var targetWidth = Math.max(1, Math.floor(imgEl.naturalWidth * targetHeight / imgEl.naturalHeight));
+  var canvas = document.createElement("canvas");
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
+  var ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(imgEl, 0, 0, targetWidth, targetHeight);
+  var pixels = ctx.getImageData(0, 0, targetWidth, targetHeight).data;
+  var data = new Float32Array(targetWidth * targetHeight);
+  for (var i = 0; i < data.length; i++) {
+    var p = i * 4;
+    var gray = 0.299 * pixels[p] + 0.587 * pixels[p + 1] + 0.114 * pixels[p + 2];
+    data[i] = (gray / 255 - 0.5) / 0.5;
+  }
+  return new ort.Tensor("float32", data, [1, 1, targetHeight, targetWidth]);
 }
 
-function argmaxDecode(data, numClasses) {
-  var L = data.length / numClasses;
-  var idx = new Array(L);
-  for (var t = 0; t < L; t++) {
-    var best = 0, bestV = -Infinity, base = t * numClasses;
-    for (var c = 0; c < numClasses; c++) {
-      if (data[base + c] > bestV) { bestV = data[base + c]; best = c; }
-    }
-    idx[t] = best;
+function decode(output) {
+  if (!output || !output.dims || !output.dims.length || !output.data) {
+    throw new Error("OCR output is empty");
   }
-  return idx;
+  var classCount = output.dims[output.dims.length - 1];
+  if (!Number.isFinite(classCount) || classCount <= 0 || output.data.length % classCount !== 0) {
+    throw new Error("OCR output shape is invalid");
+  }
+  var timeSteps = output.data.length / classCount;
+  var result = [];
+  var last = 0;
+  for (var t = 0; t < timeSteps; t++) {
+    var base = t * classCount;
+    var best = 0, bestValue = -Infinity;
+    for (var c = 0; c < classCount; c++) {
+      if (output.data[base + c] > bestValue) {
+        bestValue = output.data[base + c];
+        best = c;
+      }
+    }
+    if (best !== last) {
+      var ch = _charset[best];
+      if (best !== 0 && ch && VALID_CHARS.indexOf(ch) >= 0) result.push(ch);
+    }
+    last = best;
+  }
+  return result.join("");
 }
 
 export async function recognise(imgEl) {
-  if (!_ready) throw new Error("Model not loaded");
-  var tensor = imgElementToTensor(imgEl);
-  var results = await _session.run({ input: tensor });
-  var output = results[Object.keys(results)[0]];
-  var indices = argmaxDecode(output.data, CHARSET.length);
-  var chars = [];
-  for (var i = 0; i < indices.length; i++) chars.push(CHARSET[indices[i]]);
-  return { text: chars.join(""), chars: chars };
+  if (!_ready || !_session) throw new Error("Model not loaded");
+  var tensor = await imageToTensor(imgEl);
+  var results = await _session.run({ input1: tensor });
+  var output = results["387"] || results[Object.keys(results)[0]];
+  if (!output) throw new Error("OCR output node is missing");
+  var text = decode(output);
+  return { text: text, chars: text.split("") };
 }

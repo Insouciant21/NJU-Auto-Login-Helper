@@ -23,6 +23,8 @@ jobs:
 
       - run: npm run build
 
+      - run: npm test
+
       - name: Get version from tag
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
@@ -35,24 +37,24 @@ jobs:
           cp manifest.json "release/$PKG/"
           cp popup.html popup.js "release/$PKG/"
           cp options.html styles.css "release/$PKG/"
-          cp nju_captcha.onnx "release/$PKG/"
           cp -r dist "release/$PKG/"
           echo "PKG_DIR=release/$PKG" >> "$GITHUB_OUTPUT"
           echo "PKG_NAME=$PKG" >> "$GITHUB_OUTPUT"
 
       - name: Create ZIP
         run: |
-          cd release
-          zip -qr "${{ steps.pkg.outputs.PKG_NAME }}.zip" "${{ steps.pkg.outputs.PKG_NAME }}"
+          cd "release/${{ steps.pkg.outputs.PKG_NAME }}"
+          zip -qr "../${{ steps.pkg.outputs.PKG_NAME }}.zip" .
 
       - name: Create CRX
         env:
           KEY: ${{ secrets.CHROME_EXTENSION_PEM }}
         run: |
           if [ -n "$KEY" ]; then
+            trap 'rm -f release/key.pem' EXIT
             echo "$KEY" > release/key.pem
             node scripts/pack-crx.mjs \
-              "${{ steps.pkg.outputs.PKG_DIR }}" \
+              "release/${{ steps.pkg.outputs.PKG_NAME }}.zip" \
               release/key.pem \
               "release/${{ steps.pkg.outputs.PKG_NAME }}.crx"
             rm release/key.pem

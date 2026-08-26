@@ -7,7 +7,7 @@
     "storage"
   ],
   "host_permissions": [
-    "https://authserver.nju.edu.cn/*"
+    "https://authserver.nju.edu.cn/authserver/login*"
   ],
   "options_page": "options.html",
   "content_scripts": [
@@ -26,8 +26,14 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["nju_captcha.onnx"],
-      "matches": ["https://authserver.nju.edu.cn/*"]
+      "resources": [
+        "dist/ddddocr/*",
+        "dist/*.wasm",
+        "dist/*.mjs"
+      ],
+      "matches": [
+        "https://authserver.nju.edu.cn/*"
+      ]
     }
   ],
   "action": {

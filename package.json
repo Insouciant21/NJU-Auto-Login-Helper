@@ -4,15 +4,16 @@
   "description": "NJU unified-auth login helper — Chrome extension with captcha OCR",
   "private": true,
   "scripts": {
-    "build": "esbuild src/content.js --bundle --format=iife --outfile=dist/content.bundle.js && esbuild src/options.js --bundle --format=iife --outfile=dist/options.bundle.js",
-    "watch": "esbuild src/content.js --bundle --format=iife --outfile=dist/content.bundle.js --watch"
+    "build": "node scripts/copy-ddddocr-models.mjs && esbuild src/content.js --bundle --format=iife --outfile=dist/content.bundle.js && esbuild src/options.js --bundle --format=iife --outfile=dist/options.bundle.js",
+    "test": "node scripts/verify-build.mjs",
+    "watch": "node scripts/copy-ddddocr-models.mjs && esbuild src/content.js src/options.js --bundle --format=iife --outdir=dist --entry-names=[name].bundle --watch"
   },
   "keywords": [],
   "author": "",
   "license": "MIT",
-  "packageManager": "pnpm@10.28.2",
   "dependencies": {
-    "onnxruntime-web": "^1.26.0"
+    "ddddocr-node": "^2.3.0",
+    "onnxruntime-web": "1.23.2"
   },
   "devDependencies": {
     "esbuild": "^0.28.1",
