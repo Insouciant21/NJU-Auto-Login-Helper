@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "NJU Auto Login Helper",
   "description": "A local helper for NJU unified authentication login form autofill with captcha recognition.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "permissions": [
     "storage"
   ],

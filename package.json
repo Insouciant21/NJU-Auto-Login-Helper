@@ -1,6 +1,6 @@
 {
   "name": "NJUAutoLogin Plugin",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "NJU unified-auth login helper — Chrome extension with captcha OCR",
   "private": true,
   "scripts": {
