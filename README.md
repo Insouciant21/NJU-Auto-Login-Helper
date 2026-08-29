@@ -2,7 +2,7 @@
 
 当前版本：`v0.3.1`
 
-Chrome/Edge Manifest V3 扩展，自动填充南京大学统一身份认证页的学号、密码并处理验证码。
+Chrome/Edge Manifest V3 扩展，自动登录南京大学统一身份认证
 
 ## 下载
 
